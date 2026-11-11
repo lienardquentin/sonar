@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#04080a">
+<title>Sonar</title>
+<style>
+/* An instrument panel: phosphor green on black, like the scope of a submarine's sonar. */
+:root { color-scheme: dark; --bg: #04080a; --panel: #0a1214; --line: rgb(120 255 190 / .14); --ink: #e6fff3; --dim: #8fb5a5; --faint: #4f6f62; --glow: #5dffb0; --warm: #ffcf6a; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); font: 15px/1.45 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: max(14px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 40px max(16px, env(safe-area-inset-left)); display: grid; gap: 14px; }
+header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+h1 { margin: 0; font: 600 28px/1.1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .04em; color: var(--glow); text-shadow: 0 0 18px rgb(93 255 176 / .45); }
+#status { color: var(--dim); font: 13px ui-monospace, Menlo, monospace; margin-left: auto; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+.card h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+.note { color: var(--dim); font-size: 14px; margin: 0; }
+.btn { appearance: none; border: 0; border-radius: 12px; padding: 13px 18px; font: inherit; font-weight: 600; background: var(--glow); color: #02130b; cursor: pointer; }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.tabs { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; width: max-content; max-width: 100%; }
+.tabs button { border: 0; background: none; color: var(--dim); padding: 8px 14px; border-radius: 9px; font: inherit; font-weight: 600; cursor: pointer; }
+.tabs button[aria-selected="true"] { background: rgb(93 255 176 / .12); color: var(--glow); }
+canvas { display: block; width: 100%; border-radius: 12px; background: #000; }
+.stage { position: relative; }
+.big { position: absolute; left: 0; right: 0; bottom: 14px; text-align: center; font: 600 22px ui-monospace, Menlo, monospace; color: var(--warm); text-shadow: 0 0 14px rgb(255 207 106 / .5); pointer-events: none; transition: opacity .4s; }
+.readout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.readout div { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.readout b { display: block; font: 600 24px ui-monospace, Menlo, monospace; color: var(--glow); font-variant-numeric: tabular-nums; }
+.readout span { color: var(--faint); font-size: 12px; }
+.bars { display: flex; align-items: flex-end; gap: 3px; height: 70px; margin-top: 10px; }
+.bars i { flex: 1; background: var(--faint); border-radius: 3px 3px 0 0; min-height: 2px; }
+.bars i.pick { background: var(--glow); }
+.legend { display: flex; justify-content: space-between; color: var(--faint); font: 11px ui-monospace, Menlo, monospace; margin-top: 4px; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>SONAR</h1><span id="status">off</span></header>
+
+  <section class="card" id="intro">
+    <h2>Your device, seeing with sound</h2>
+    <p class="note">The speaker sends out a tone too high for you to hear, and the microphone listens to its echoes. Anything that moves changes the echo: your hand in the air, someone walking in, your chest as you breathe. Turn the volume up (no headphones), give the microphone permission, and keep still for two seconds while it finds the best inaudible tone for your speaker.</p>
+    <p style="margin:14px 0 0"><button class="btn" id="go">Start the sonar</button></p>
+  </section>
+
+  <section class="card" id="calib" hidden>
+    <h2>Finding the tone</h2>
+    <p class="note" id="calib-note">Trying high tones one by one…</p>
+    <div class="bars" id="bars"></div>
+    <div class="legend"><span>17.5 kHz</span><span>how loud each tone came back</span><span id="calib-top">21 kHz</span></div>
+  </section>
+
+  <div class="tabs" id="tabs" hidden><button data-tab="wave" aria-selected="true">Wave</button><button data-tab="breathe" aria-selected="false">Breathe</button><button data-tab="presence" aria-selected="false">Presence</button></div>
+
+  <section class="card" id="wave" hidden>
+    <h2>Wave at it</h2>
+    <p class="note">Hold a hand 10 to 40 cm from the device. Push it toward the screen, pull it back, or wave. The orb follows your hand; below, every movement leaves a streak in the echo.</p>
+    <div class="stage" style="margin-top:12px"><canvas id="orb" height="260"></canvas><div class="big" id="gesture"></div></div>
+    <div class="readout"><div><b id="w-speed">0.00</b><span>hand speed, m/s</span></div><div><b id="w-move">0.0</b><span>moved, cm</span></div><div><b id="w-count">0</b><span>gestures</span></div></div>
+    <h2 style="margin-top:16px">The echo</h2>
+    <p class="note">Each row is a moment, newest at the top. The bright line in the middle is the tone itself; streaks to the right are things coming closer, to the left things moving away.</p>
+    <canvas id="fall" height="260" style="margin-top:10px"></canvas>
+    <div class="legend"><span>moving away</span><span>the tone</span><span>coming closer</span></div>
+  </section>
+
+  <section class="card" id="breathe" hidden>
+    <h2>Breathing, from a distance</h2>
+    <p class="note">Put the device on a table 30 to 60 cm from your chest, screen toward you, and sit still. Every breath moves your chest a few millimetres, which turns the echo by a measurable amount. Give it about 30 seconds.</p>
+    <canvas id="breath" height="200" style="margin-top:12px"></canvas>
+    <div class="readout"><div><b id="b-rate">–</b><span>breaths a minute</span></div><div><b id="b-depth">–</b><span>chest moves, mm</span></div><div><b id="b-sure">–</b><span>how sure</span></div></div>
+  </section>
+
+  <section class="card" id="presence" hidden>
+    <h2>Is anyone moving?</h2>
+    <p class="note">Leave the device in a room. It hears movement anywhere in front of it, a few metres away, with no camera: the timeline shows the last two minutes.</p>
+    <canvas id="pres" height="180" style="margin-top:12px"></canvas>
+    <div class="readout"><div><b id="p-now">–</b><span>right now</span></div><div><b id="p-level">0</b><span>movement</span></div><div><b id="p-last">–</b><span>last movement</span></div></div>
+  </section>
+
+  <p class="note" style="font-size:12.5px;color:var(--faint)">Everything happens in this page: no sound is recorded or sent anywhere. Some speakers and microphones barely reach these frequencies; if the tone search finds nothing, try another device.</p>
+</main>
+<script src="sonar.js"></script>
+</body>
+</html>
