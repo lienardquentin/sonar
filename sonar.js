@@ -51,33 +51,44 @@ async function start() {
   requestAnimationFrame(frame);
 }
 async function findTone() {
-  // each candidate tone for a moment: how far it stands above the hiss next to it, as the microphone hears it
+  // each candidate tone long enough to really come out of the speaker (phones can take a quarter of a second), then the
+  // loudest of a few readings, against the hiss next to it
   $("#calib").hidden = false;
   const top = Math.min(21000, ctx.sampleRate / 2 - 1500), tones = [];
-  for (let f = 17500; f <= top; f += 250) tones.push(f);
+  for (let f = 16000; f <= top; f += 250) tones.push(f);
   $("#calib-top").textContent = `${(top / 1000).toFixed(1)} kHz`;
+  document.querySelector("#calib .legend span").textContent = "16 kHz";
   $("#bars").replaceChildren(...tones.map(() => document.createElement("i")));
   const buf = new Float32Array(analyser.frequencyBinCount), bin = ctx.sampleRate / analyser.fftSize, snr = [];
-  gain.gain.setTargetAtTime(0.3, ctx.currentTime, 0.02);
+  const lag = (ctx.outputLatency || 0) + (ctx.baseLatency || 0), dwell = Math.max(350, Math.round((lag + 0.25) * 1000));
+  gain.gain.setTargetAtTime(0.5, ctx.currentTime, 0.02);
   for (const [k, f] of tones.entries()) {
     osc.frequency.setValueAtTime(f, ctx.currentTime);
-    await new Promise((r) => setTimeout(r, 180));
-    analyser.getFloatFrequencyData(buf);
-    const c = Math.round(f / bin); let peak = -Infinity, floor = 0, n = 0;
-    for (let j = c - 2; j <= c + 2; j++) peak = Math.max(peak, buf[j]);
-    for (let j = c - 40; j <= c + 40; j++) if (Math.abs(j - c) > 6) { floor += buf[j]; n++; }
-    snr.push(peak - floor / n);
-    $("#bars").children[k].style.height = `${Math.max(2, Math.min(100, snr[k] * 1.6))}%`;
+    await new Promise((r) => setTimeout(r, dwell));
+    const c = Math.round(f / bin); let best = -Infinity;
+    for (let read = 0; read < 3; read++) {
+      analyser.getFloatFrequencyData(buf);
+      let peak = -Infinity, floor = 0, n = 0;
+      for (let j = c - 2; j <= c + 2; j++) peak = Math.max(peak, buf[j]);
+      for (let j = c - 40; j <= c + 40; j++) if (Math.abs(j - c) > 6) { floor += buf[j]; n++; }
+      best = Math.max(best, peak - floor / n);
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    snr.push(best);
+    $("#bars").children[k].style.height = `${Math.max(2, Math.min(100, best * 1.6))}%`;
   }
   gain.gain.setTargetAtTime(0, ctx.currentTime, 0.02);
-  // the highest tone that comes back clearly; above 18.5 kHz if possible, where adults stop hearing
-  let pick = -1;
-  for (let k = tones.length - 1; k >= 0; k--) if (snr[k] > 28 && tones[k] >= 18500) { pick = k; break; }
-  if (pick < 0) { const best = Math.max(...snr); if (best > 18) pick = snr.indexOf(best); }
-  if (pick < 0) { $("#calib-note").textContent = "None of the high tones came back: this speaker or microphone doesn't reach them. Turn the volume up and try again, or try a phone."; return 0; }
+  // the highest tone that comes back clearly, above 18.5 kHz if possible (where adults stop hearing), lower if need be
+  const pickFrom = (min, need) => { for (let k = tones.length - 1; k >= 0; k--) if (tones[k] >= min && snr[k] > need) return k; return -1; };
+  let pick = pickFrom(18500, 20);
+  if (pick < 0) pick = pickFrom(17000, 15);
+  if (pick < 0) pick = pickFrom(16000, 12);
+  const top3 = tones.map((f, k) => [f, snr[k]]).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([f, v]) => `${(f / 1000).toFixed(2)} kHz ${Math.round(v)} dB`).join(", ");
+  const diag = `(audio ${ctx.sampleRate / 1000} kHz, delay ${Math.round(lag * 1000)} ms; best: ${top3})`;
+  if (pick < 0) { $("#calib-note").textContent = `None of the high tones came back clearly: this speaker or microphone may filter them out. Check the volume, no headphones, and try again. ${diag}`; return 0; }
   $("#bars").children[pick].classList.add("pick");
-  $("#calib-note").textContent = `${(tones[pick] / 1000).toFixed(2)} kHz comes back ${Math.round(snr[pick])} dB above the hiss${tones[pick] < 18500 ? " (some people can just hear it: a faint whine)" : ", above what most adults can hear"}.`;
-  setTimeout(() => ($("#calib").hidden = true), 2500);
+  $("#calib-note").textContent = `${(tones[pick] / 1000).toFixed(2)} kHz comes back ${Math.round(snr[pick])} dB above the hiss${tones[pick] < 18500 ? ": you may just hear it, a faint whine" : ", above what most adults can hear"}. ${diag}`;
+  setTimeout(() => ($("#calib").hidden = true), 4000);
   return tones[pick];
 }
 

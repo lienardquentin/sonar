@@ -42,7 +42,7 @@ canvas { display: block; width: 100%; border-radius: 12px; background: #000; }
 
   <section class="card" id="intro">
     <h2>Your device, seeing with sound</h2>
-    <p class="note">The speaker sends out a tone too high for you to hear, and the microphone listens to its echoes. Anything that moves changes the echo: your hand in the air, someone walking in, your chest as you breathe. Turn the volume up (no headphones), give the microphone permission, and keep still for two seconds while it finds the best inaudible tone for your speaker.</p>
+    <p class="note">The speaker sends out a tone too high for you to hear, and the microphone listens to its echoes. Anything that moves changes the echo: your hand in the air, someone walking in, your chest as you breathe. Turn the volume up (no headphones), give the microphone permission, and keep still for about ten seconds while it finds the best inaudible tone for your speaker.</p>
     <p style="margin:14px 0 0"><button class="btn" id="go">Start the sonar</button></p>
   </section>
 
@@ -50,7 +50,7 @@ canvas { display: block; width: 100%; border-radius: 12px; background: #000; }
     <h2>Finding the tone</h2>
     <p class="note" id="calib-note">Trying high tones one by one…</p>
     <div class="bars" id="bars"></div>
-    <div class="legend"><span>17.5 kHz</span><span>how loud each tone came back</span><span id="calib-top">21 kHz</span></div>
+    <div class="legend"><span>16 kHz</span><span>how loud each tone came back</span><span id="calib-top">21 kHz</span></div>
   </section>
 
   <div class="tabs" id="tabs" hidden><button data-tab="wave" aria-selected="true">Wave</button><button data-tab="breathe" aria-selected="false">Breathe</button><button data-tab="presence" aria-selected="false">Presence</button></div>
