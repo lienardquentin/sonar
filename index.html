@@ -33,6 +33,10 @@ canvas { display: block; width: 100%; border-radius: 12px; background: #000; }
 .bars i { flex: 1; background: var(--faint); border-radius: 3px 3px 0 0; min-height: 2px; }
 .bars i.pick { background: var(--glow); }
 .legend { display: flex; justify-content: space-between; color: var(--faint); font: 11px ui-monospace, Menlo, monospace; margin-top: 4px; }
+.controls { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.controls label { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.controls input { accent-color: var(--glow); width: 140px; } .controls .note { font-size: 12.5px; }
+#sens-word { color: var(--glow); font: 600 13px ui-monospace, Menlo, monospace; min-width: 70px; }
 [hidden] { display: none !important; }
 </style>
 </head>
@@ -53,6 +57,7 @@ canvas { display: block; width: 100%; border-radius: 12px; background: #000; }
     <div class="legend"><span>16 kHz</span><span>how loud each tone came back</span><span id="calib-top">21 kHz</span></div>
   </section>
 
+  <div class="controls" id="controls" hidden><label>Sensitivity <input type="range" id="sens" min="1" max="5" step="1" value="3"> <span id="sens-word">normal</span></label><span class="note">Keener hears further, but in a noisy room it may see movement that isn't there.</span></div>
   <div class="tabs" id="tabs" hidden><button data-tab="wave" aria-selected="true">Wave</button><button data-tab="breathe" aria-selected="false">Breathe</button><button data-tab="presence" aria-selected="false">Presence</button></div>
 
   <section class="card" id="wave" hidden>

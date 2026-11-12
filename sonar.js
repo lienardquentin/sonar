@@ -1,25 +1,29 @@
 "use strict";
-// Sonar in a web page. The speaker plays a steady tone above hearing (around 19 kHz); the microphone hears it back,
+// Sonar in a web page. The speaker plays steady tones above hearing (around 19 kHz); the microphone hears them back,
 // straight from the speaker and bounced off everything in the room. An audio worklet mixes what it hears with the
-// same tone (I/Q demodulation), leaving a slowly turning arrow: the still things add up to a fixed part, and
+// same tones (I/Q demodulation), leaving for each a slowly turning arrow: the still things add up to a fixed part, and
 // anything that moves turns its own part by a full circle for every half wavelength (about 9 mm) it travels.
-// That arrow, 500 times a second, is all the rest reads: fast turns are a hand, slow sways are a chest breathing.
+// Those arrows, 500 times a second, are all the rest reads: fast turns are a hand, slow sways are a chest breathing.
+// Two tones exactly one reading-rate apart (500 Hz) don't disturb each other: averaging over one reading cancels the
+// other tone completely. Two echoes are steadier than one: where one tone's echo happens to cancel itself, the other's doesn't.
 const $ = (s) => document.querySelector(s);
 const C = 343;  // the speed of sound, m/s
-let ctx, osc, gain, analyser, F0 = 0, RATE = 500;  // readings a second: fast enough for a hand at 2 m/s
+let ctx, gains = [], oscs = [], analyser, TONES = [], RATE = 500, DEC = 96;
 
 const WORKLET = `class IQ extends AudioWorkletProcessor {
-  constructor() { super(); this.f = 0; this.ph = 0; this.n = 0; this.i = 0; this.q = 0; this.out = []; this.dec = Math.round(sampleRate / 500);
-    this.port.onmessage = (e) => { this.f = e.data; }; }
+  constructor() { super(); this.fs = []; this.n = 0; this.out = []; this.dec = Math.round(sampleRate / 500);
+    this.port.onmessage = (e) => { this.fs = e.data; this.ph = e.data.map(() => 0); this.acc = e.data.map(() => [0, 0]); }; }
   process(inputs) {
-    const x = inputs[0] && inputs[0][0]; if (!x || !this.f) return true;
-    const w = 2 * Math.PI * this.f / sampleRate;
+    const x = inputs[0] && inputs[0][0]; if (!x || !this.fs.length) return true;
+    const T = 6.283185307179586;
     for (let k = 0; k < x.length; k++) {
-      this.i += x[k] * Math.cos(this.ph); this.q -= x[k] * Math.sin(this.ph);
-      this.ph += w; if (this.ph > 6.283185307179586) this.ph -= 6.283185307179586;
-      if (++this.n === this.dec) { this.out.push(this.i / this.dec, this.q / this.dec); this.i = this.q = 0; this.n = 0; }
+      for (let t = 0; t < this.fs.length; t++) {
+        const a = this.acc[t], ph = this.ph[t]; a[0] += x[k] * Math.cos(ph); a[1] -= x[k] * Math.sin(ph);
+        this.ph[t] = (ph + T * this.fs[t] / sampleRate) % T;
+      }
+      if (++this.n === this.dec) { for (const a of this.acc) { this.out.push(a[0] / this.dec, a[1] / this.dec); a[0] = a[1] = 0; } this.n = 0; }
     }
-    if (this.out.length >= 20) { this.port.postMessage(this.out); this.out = []; }
+    if (this.out.length >= 20 * this.fs.length) { this.port.postMessage(this.out); this.out = []; }
     return true;
   }
 }
@@ -27,43 +31,47 @@ registerProcessor("iq", IQ);`;
 
 // ---- starting: the microphone raw (no echo cancelling: the echo is the point), then the tone search ----
 $("#go").addEventListener("click", start);
+let iqNode;
 async function start() {
   let stream;
   try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } }); }
   catch (e) { $("#status").textContent = "no microphone: allow it in the address bar"; return; }
   ctx = new AudioContext({ latencyHint: "interactive" });
   await ctx.resume();
+  DEC = Math.round(ctx.sampleRate / 500); RATE = ctx.sampleRate / DEC;
   const mic = ctx.createMediaStreamSource(stream);
   analyser = ctx.createAnalyser(); analyser.fftSize = 8192; analyser.smoothingTimeConstant = 0; mic.connect(analyser);
   await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
-  const iq = new AudioWorkletNode(ctx, "iq"), mute = ctx.createGain(); mute.gain.value = 0;
-  mic.connect(iq); iq.connect(mute).connect(ctx.destination);
-  iq.port.onmessage = (e) => onIQ(e.data);
-  osc = ctx.createOscillator(); gain = ctx.createGain(); gain.gain.value = 0; osc.connect(gain).connect(ctx.destination); osc.start();
+  iqNode = new AudioWorkletNode(ctx, "iq"); const mute = ctx.createGain(); mute.gain.value = 0;
+  mic.connect(iqNode); iqNode.connect(mute).connect(ctx.destination);
+  iqNode.port.onmessage = (e) => onIQ(e.data);
+  for (let k = 0; k < 2; k++) { const o = ctx.createOscillator(), gn = ctx.createGain(); gn.gain.value = 0; o.connect(gn).connect(ctx.destination); o.start(); oscs.push(o); gains.push(gn); }
   try { await navigator.wakeLock?.request("screen"); } catch (e) {}
   $("#intro").hidden = true;
-  F0 = await findTone();
-  if (!F0) return;
-  iq.port.postMessage(F0); osc.frequency.value = F0;
-  gain.gain.setTargetAtTime(0.3, ctx.currentTime, 0.05);
-  $("#tabs").hidden = false; show("wave");
-  $("#status").textContent = `${(F0 / 1000).toFixed(2)} kHz · listening`;
+  const fs = await findTones();
+  if (!fs) return;
+  TONES = fs.map((f) => tone(f));
+  iqNode.port.postMessage(fs);
+  // as loud as the speaker allows without distorting: the tones' peaks add up, so share the headroom
+  const level = fs.length === 1 ? 0.75 : 0.42;
+  fs.forEach((f, k) => { oscs[k].frequency.value = f; gains[k].gain.setTargetAtTime(level, ctx.currentTime, 0.05); });
+  $("#tabs").hidden = false; $("#controls").hidden = false; show("wave");
+  $("#status").textContent = `${fs.map((f) => (f / 1000).toFixed(2)).join(" + ")} kHz · listening`;
   requestAnimationFrame(frame);
 }
-async function findTone() {
+async function findTones() {
   // each candidate tone long enough to really come out of the speaker (phones can take a quarter of a second), then the
   // loudest of a few readings, against the hiss next to it
   $("#calib").hidden = false;
   const top = Math.min(21000, ctx.sampleRate / 2 - 1500), tones = [];
   for (let f = 16000; f <= top; f += 250) tones.push(f);
   $("#calib-top").textContent = `${(top / 1000).toFixed(1)} kHz`;
-  document.querySelector("#calib .legend span").textContent = "16 kHz";
   $("#bars").replaceChildren(...tones.map(() => document.createElement("i")));
   const buf = new Float32Array(analyser.frequencyBinCount), bin = ctx.sampleRate / analyser.fftSize, snr = [];
   const lag = (ctx.outputLatency || 0) + (ctx.baseLatency || 0), dwell = Math.max(350, Math.round((lag + 0.25) * 1000));
-  gain.gain.setTargetAtTime(0.5, ctx.currentTime, 0.02);
+  gains[0].gain.setTargetAtTime(0.5, ctx.currentTime, 0.02);
   for (const [k, f] of tones.entries()) {
-    osc.frequency.setValueAtTime(f, ctx.currentTime);
+    oscs[0].frequency.setValueAtTime(f, ctx.currentTime);
     await new Promise((r) => setTimeout(r, dwell));
     const c = Math.round(f / bin); let best = -Infinity;
     for (let read = 0; read < 3; read++) {
@@ -77,77 +85,112 @@ async function findTone() {
     snr.push(best);
     $("#bars").children[k].style.height = `${Math.max(2, Math.min(100, best * 1.6))}%`;
   }
-  gain.gain.setTargetAtTime(0, ctx.currentTime, 0.02);
-  // the highest tone that comes back clearly, above 18.5 kHz if possible (where adults stop hearing), lower if need be
+  gains[0].gain.setTargetAtTime(0, ctx.currentTime, 0.02);
+  const top3 = tones.map((f, k) => [f, snr[k]]).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([f, v]) => `${(f / 1000).toFixed(2)} kHz ${Math.round(v)} dB`).join(", ");
+  const diag = `(audio ${ctx.sampleRate / 1000} kHz, delay ${Math.round(lag * 1000)} ms; best: ${top3})`;
+  // a pair if possible: the highest tone that comes back clearly with its partner 500 Hz above it also clear
+  for (let k = tones.length - 3; k >= 0; k--) if (tones[k] >= 18000 && snr[k] > 20 && snr[k + 2] > 20) {
+    $("#bars").children[k].classList.add("pick"); $("#bars").children[k + 2].classList.add("pick");
+    $("#calib-note").textContent = `Two tones, ${(tones[k] / 1000).toFixed(2)} and ${((tones[k] + RATE) / 1000).toFixed(2)} kHz, come back ${Math.round(Math.min(snr[k], snr[k + 2]))} dB or more above the hiss${tones[k] < 18500 ? ": you may just hear them, a faint whine" : ""}. ${diag}`;
+    setTimeout(() => ($("#calib").hidden = true), 4000);
+    return [tones[k], tones[k] + RATE];
+  }
+  // otherwise one tone: above 18.5 kHz if possible (where adults stop hearing), lower if need be
   const pickFrom = (min, need) => { for (let k = tones.length - 1; k >= 0; k--) if (tones[k] >= min && snr[k] > need) return k; return -1; };
   let pick = pickFrom(18500, 20);
   if (pick < 0) pick = pickFrom(17000, 15);
   if (pick < 0) pick = pickFrom(16000, 12);
-  const top3 = tones.map((f, k) => [f, snr[k]]).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([f, v]) => `${(f / 1000).toFixed(2)} kHz ${Math.round(v)} dB`).join(", ");
-  const diag = `(audio ${ctx.sampleRate / 1000} kHz, delay ${Math.round(lag * 1000)} ms; best: ${top3})`;
-  if (pick < 0) { $("#calib-note").textContent = `None of the high tones came back clearly: this speaker or microphone may filter them out. Check the volume, no headphones, and try again. ${diag}`; return 0; }
+  if (pick < 0) { $("#calib-note").textContent = `None of the high tones came back clearly: this speaker or microphone may filter them out. Check the volume, no headphones, and try again. ${diag}`; return null; }
   $("#bars").children[pick].classList.add("pick");
-  $("#calib-note").textContent = `${(tones[pick] / 1000).toFixed(2)} kHz comes back ${Math.round(snr[pick])} dB above the hiss${tones[pick] < 18500 ? ": you may just hear it, a faint whine" : ", above what most adults can hear"}. ${diag}`;
+  $("#calib-note").textContent = `One tone, ${(tones[pick] / 1000).toFixed(2)} kHz, comes back ${Math.round(snr[pick])} dB above the hiss${tones[pick] < 18500 ? ": you may just hear it, a faint whine" : ""}. ${diag}`;
   setTimeout(() => ($("#calib").hidden = true), 4000);
-  return tones[pick];
+  return [tones[pick]];
 }
 
-// ---- reading the echo, 500 times a second ----
+// ---- reading the echoes, 500 times a second ----
+function tone(f) { return { f, lam: C / f, rot: 0, rotRate: 0, prev: null, mean: null, ring: [], long: [], slow: { mean: null, buf: [], acc: [0, 0, 0] } }; }
+const SENS = [6, 4, 3, 2.2, 1.6];  // how far above the room's noise a movement must stand, from cautious to keen
 const S = {
-  mean: null, rot: 0, rotRate: 0, ring: [], tick: 0, floor: 1e-6, spec: new Float32Array(64),
+  tick: 0, floor: 1e-6, floorLong: 1e-6, sens: 3,
   v: 0, motion: 0, disp: 0, active: false, quietFor: 0, flips: [], lastSign: 0, gestures: 0, orb: 0,
-  slow: { mean: null, buf: [] }, pres: [], lastMove: 0,
+  presLevel: 0, pres: [], lastMove: 0,
 };
-const lam = () => C / F0;  // the wavelength, m (about 18 mm at 19 kHz)
+const lam = () => TONES.reduce((a, t) => a + t.lam, 0) / TONES.length;  // the wavelength, m (about 18 mm at 19 kHz)
 function onIQ(a) {
-  for (let k = 0; k < a.length; k += 2) step(a[k], a[k + 1]);
+  const n = TONES.length; if (!n) return;
+  for (let k = 0; k + 2 * n <= a.length; k += 2 * n) {
+    for (let t = 0; t < n; t++) step(TONES[t], a[k + 2 * t], a[k + 2 * t + 1]);
+    S.tick++;
+    if (S.tick % 16 === 0 && TONES[0].ring.length === N) doppler();
+    if (S.tick % 128 === 0 && TONES[0].long.length === NL) dopplerLong();
+    if (S.tick % 250 === 0) presence();
+  }
 }
-function step(i, q) {
-  const dt = 1 / RATE;
+function step(T, i, q) {
   // the speaker's and the microphone's clocks can differ by a hair, which turns even the still echo slowly: follow that turn and undo it
-  if (S.prevRaw) { const d = Math.atan2(q * S.prevRaw[0] - i * S.prevRaw[1], i * S.prevRaw[0] + q * S.prevRaw[1]); S.rotRate += (d - S.rotRate) * 0.0004; }
-  S.prevRaw = [i, q]; S.rot += S.rotRate;
-  const cr = Math.cos(-S.rot), sr = Math.sin(-S.rot), x = i * cr - q * sr, y = i * sr + q * cr;
-  // the still part: a running average over about a second; what's left over is what moves
-  if (!S.mean) S.mean = [x, y];
-  S.mean[0] += (x - S.mean[0]) * 0.002; S.mean[1] += (y - S.mean[1]) * 0.002;
-  S.ring.push([x - S.mean[0], y - S.mean[1]]); if (S.ring.length > N) S.ring.shift();
-  if (++S.tick % 16 === 0 && S.ring.length === N) doppler(Math.hypot(...S.mean) || 1e-9);
-  breathing(x, y);
-  presence();
+  if (T.prev) { const d = Math.atan2(q * T.prev[0] - i * T.prev[1], i * T.prev[0] + q * T.prev[1]); T.rotRate += (d - T.rotRate) * 0.0004; }
+  T.prev = [i, q]; T.rot += T.rotRate;
+  const cr = Math.cos(-T.rot), sr = Math.sin(-T.rot), x = i * cr - q * sr, y = i * sr + q * cr;
+  // the still part: a running average over about two seconds; what's left over is what moves
+  if (!T.mean) T.mean = [x, y];
+  T.mean[0] += (x - T.mean[0]) * 0.001; T.mean[1] += (y - T.mean[1]) * 0.001;
+  const z = [x - T.mean[0], y - T.mean[1]];
+  T.ring.push(z); if (T.ring.length > N) T.ring.shift();
+  T.long.push(z); if (T.long.length > NL) T.long.shift();
+  breathing(T, x, y);
 }
 
-// ---- the Doppler spectrum: every 32 ms, the last eighth of a second split into frequencies ----
+// ---- the Doppler spectrum: the last stretch of each echo split into frequencies, the tones' spectra added up ----
 // the still room sits at 0 Hz; a hand coming closer at v m/s shows up 2v/λ Hz above it, going away the same below
-const N = 64, COS = [], SIN = [];
-for (let k = 0; k < N; k++) for (let n = 0; n < N; n++) { COS.push(Math.cos(2 * Math.PI * k * n / N)); SIN.push(Math.sin(2 * Math.PI * k * n / N)); }
-const HANN = Array.from({ length: N }, (_, n) => 0.5 - 0.5 * Math.cos(2 * Math.PI * n / (N - 1)));
-function doppler(ref) {
-  const pw = new Float32Array(N);
-  for (let k = 0; k < N; k++) {
-    let re = 0, im = 0;
-    for (let n = 0; n < N; n++) { const [a, b] = S.ring[n], h = HANN[n], c = COS[k * N + n], sn = SIN[k * N + n]; re += (a * c + b * sn) * h; im += (b * c - a * sn) * h; }
-    pw[k] = (re * re + im * im) / (ref * ref * N * N);
+function dft(n) {
+  const cos = new Float32Array(n * n), sin = new Float32Array(n * n), hann = new Float32Array(n);
+  for (let k = 0; k < n; k++) for (let j = 0; j < n; j++) { cos[k * n + j] = Math.cos(2 * Math.PI * k * j / n); sin[k * n + j] = Math.sin(2 * Math.PI * k * j / n); }
+  for (let j = 0; j < n; j++) hann[j] = 0.5 - 0.5 * Math.cos(2 * Math.PI * j / (n - 1));
+  return { n, cos, sin, hann };
+}
+const N = 64, NL = 256, D = dft(N), DL = dft(NL);
+function spectrum(key, d) {  // the power at each frequency, each tone against its own still echo, summed over the tones
+  const n = d.n, pw = new Float32Array(n);
+  for (const T of TONES) {
+    const ring = T[key], ref2 = (T.mean[0] ** 2 + T.mean[1] ** 2) || 1e-18;
+    for (let k = 0; k < n; k++) {
+      let re = 0, im = 0;
+      for (let j = 0; j < n; j++) { const [a, b] = ring[j], h = d.hann[j], c = d.cos[k * n + j], s = d.sin[k * n + j]; re += (a * c + b * s) * h; im += (b * c - a * s) * h; }
+      pw[k] += (re * re + im * im) / (ref2 * n * n * TONES.length);
+    }
   }
-  // bins 2..31 are coming closer, 33..62 going away (bin k is k × 500/64 ≈ 7.8 Hz); 0 and its neighbours are the still room
-  let tot = 0, mom = 0;
-  for (let k = 2; k < N - 1; k++) {
+  return pw;
+}
+function doppler() {
+  // every 32 ms, the last eighth of a second: quick enough for a hand
+  const pw = spectrum("ring", D);
+  let tot = 0, mom = 0, cnt = 0;
+  for (let k = 2; k < N - 1; k++) {  // 0 and its neighbours are the still room
     if (k === N / 2) continue;
-    const f = (k < N / 2 ? k : k - N) * RATE / N, e = Math.max(0, pw[k] - S.floor * 1.5);
-    tot += pw[k]; mom += e * f; S.spec[k] = pw[k];
+    const f = (k < N / 2 ? k : k - N) * RATE / N;
+    tot += pw[k]; mom += Math.max(0, pw[k] - S.floor * 1.5) * f; cnt++;
   }
   // the room's own noise level, followed: down at once, up slowly
-  S.floor += (tot / (N - 4) < S.floor ? 0.2 : 0.002) * (tot / (N - 4) - S.floor);
-  const strength = tot / (N - 4) / Math.max(S.floor, 1e-12), wsum = Math.max(1e-12, tot - S.floor * 1.5 * (N - 4));
-  S.motion += ((strength > 3 ? Math.log10(strength) : 0) - S.motion) * 0.3;  // 0 when still, about 1 for a hand
-  const v = strength > 3 ? (mom / wsum) * lam() / 2 : 0;
+  S.floor += (tot / cnt < S.floor ? 0.2 : 0.002) * (tot / cnt - S.floor);
+  const need = SENS[S.sens - 1], strength = tot / cnt / Math.max(S.floor, 1e-15), wsum = Math.max(1e-15, tot - S.floor * 1.5 * cnt);
+  S.motion += ((strength > need ? Math.log10(strength) : 0) - S.motion) * 0.3;  // 0 when still, about 1 for a hand
+  const v = strength > need ? (mom / wsum) * lam() / 2 : 0;
   S.v += (v - S.v) * 0.5;
-  gestures(16 / RATE);
+  gestures(16 / RATE, Math.log10(need) * 0.85);
+}
+function dopplerLong() {
+  // every quarter second, the last half second: slower, but it hears fainter movement, further away
+  const pw = spectrum("long", DL);
+  let tot = 0, cnt = 0;
+  for (let k = 3; k < NL - 2; k++) { if (Math.abs(k - NL / 2) < 2) continue; tot += pw[k]; cnt++; }
+  S.floorLong += (tot / cnt < S.floorLong ? 0.2 : 0.01) * (tot / cnt - S.floorLong);
+  const strength = tot / cnt / Math.max(S.floorLong, 1e-15), need = SENS[S.sens - 1] * 0.8;
+  S.presLevel = strength > need ? Math.log10(strength) : 0;
 }
 
 // ---- gestures: a push, a pull, a wave ----
-function gestures(dt) {
-  const moving = S.motion > 0.4;
+function gestures(dt, threshold) {
+  const moving = S.motion > threshold;
   if (moving) { S.active = true; S.quietFor = 0; S.disp += S.v * dt; }
   else if (S.active && (S.quietFor += dt) > 0.2) {  // the hand has stopped: what was that?
     const sign = Math.sign(S.disp);
@@ -168,26 +211,30 @@ function say(t) {
   S.flash = performance.now();
 }
 
-// ---- breathing: the same arrow, much slower ----
-function breathing(x, y) {
-  const B = S.slow;
+// ---- breathing: the same arrows, much slower; the tone that hears the chest best wins ----
+function breathing(T, x, y) {
+  const B = T.slow;
   if (!B.mean) B.mean = [x, y];
   B.mean[0] += (x - B.mean[0]) * 0.0001; B.mean[1] += (y - B.mean[1]) * 0.0001;  // the still part over about 20 seconds
-  B.acc = B.acc || [0, 0, 0]; B.acc[0] += x - B.mean[0]; B.acc[1] += y - B.mean[1];
+  B.acc[0] += x - B.mean[0]; B.acc[1] += y - B.mean[1];
   if (++B.acc[2] < 50) return;  // fifty readings averaged: 10 a second is plenty for breaths
   B.buf.push([B.acc[0] / 50, B.acc[1] / 50]); B.acc = [0, 0, 0];
   if (B.buf.length > 600) B.buf.shift();  // a minute
-  if (B.buf.length % 10 === 0 && B.buf.length >= 150) estimateBreath();
+  if (T === TONES[TONES.length - 1] && B.buf.length % 10 === 0 && B.buf.length >= 150) {
+    const all = TONES.map((t) => estimateBreath(t)).filter(Boolean);
+    if (all.length) S.breath = all.sort((a, b) => b.sure - a.sure)[0];
+  }
 }
-function estimateBreath() {
+function estimateBreath(T) {
   // the chest's echo turns around a fixed centre as the chest moves (a full turn per 9 mm of movement): fit that circle,
   // and the angle around it is the chest's position, in millimetres
-  const pts = S.slow.buf.slice(-400), n = pts.length;
+  const pts = T.slow.buf.slice(-400), n = pts.length;
+  if (n < 150) return null;
   const fit = circle(pts);
   let s;
   if (fit && fit.r > 0) {
     let prev = null, off = 0;
-    s = pts.map(([x, y]) => { let a = Math.atan2(y - fit.cy, x - fit.cx); if (prev != null) { while (a + off - prev > Math.PI) off -= 2 * Math.PI; while (a + off - prev < -Math.PI) off += 2 * Math.PI; } prev = a + off; return prev * lam() / (4 * Math.PI) * 1000; });
+    s = pts.map(([x, y]) => { let a = Math.atan2(y - fit.cy, x - fit.cx); if (prev != null) { while (a + off - prev > Math.PI) off -= 2 * Math.PI; while (a + off - prev < -Math.PI) off += 2 * Math.PI; } prev = a + off; return prev * T.lam / (4 * Math.PI) * 1000; });
   } else {
     // a circle that won't fit: fall back to the swing along its main line (no millimetres then)
     const mx = pts.reduce((a, p) => a + p[0], 0) / n, my = pts.reduce((a, p) => a + p[1], 0) / n;
@@ -202,7 +249,7 @@ function estimateBreath() {
   let best = 0, lag = 0;
   for (let L = 15; L <= 100; L++) { let a = 0; for (let k = L; k < n; k++) a += s[k] * s[k - L]; a /= energy; if (a > best) { best = a; lag = L; } }
   const sorted = [...s].sort((a, b) => a - b), span = sorted[Math.floor(n * 0.95)] - sorted[Math.floor(n * 0.05)];
-  S.breath = { wave: s, rate: lag ? 600 / lag : null, sure: best, mm: fit ? span : null };
+  return { wave: s, rate: lag ? 600 / lag : null, sure: best, mm: fit ? span : null };
 }
 function circle(pts) {
   // least-squares circle through the points (Kåsa's method); null when they don't trace a usable arc
@@ -217,11 +264,9 @@ function circle(pts) {
   return Math.sqrt(res / n) < 0.35 * spread && r < 50 * spread ? { cx: mx + uc, cy: my + vc, r } : null;  // a near-straight line has a useless huge radius
 }
 
-// ---- presence: is anything moving in the room ----
+// ---- presence: is anything moving in the room (the slow, keen spectrum), two points a second ----
 function presence() {
-  S.presAcc = (S.presAcc || 0) + S.motion; S.presN = (S.presN || 0) + 1;
-  if (S.presN < 250) return;  // two points a second
-  const level = S.presAcc / S.presN; S.presAcc = 0; S.presN = 0;
+  const level = Math.max(S.presLevel, S.motion);
   S.pres.push(level); if (S.pres.length > 240) S.pres.shift();
   if (level > 0.25) S.lastMove = Date.now();
 }
@@ -257,7 +302,7 @@ function drawFall() {
   const c = $("#fall"), [g, w, h, r] = fit(c);
   if (!fbuf.data || fbuf.data.length !== analyser.frequencyBinCount) fbuf.data = new Float32Array(analyser.frequencyBinCount);
   analyser.getFloatFrequencyData(fbuf.data);
-  const bin = ctx.sampleRate / analyser.fftSize, c0 = F0 / bin, span = Math.round(250 / bin);
+  const bin = ctx.sampleRate / analyser.fftSize, c0 = TONES[0].f / bin, span = Math.round(250 / bin);
   g.setTransform(1, 0, 0, 1, 0, 0);
   g.drawImage(c, 0, 0, c.width, c.height - 2 * r, 0, 2 * r, c.width, c.height - 2 * r);  // scroll down
   const peak = fbuf.data[Math.round(c0)];
@@ -272,7 +317,7 @@ function drawBreath() {
   const [g, w, h, r] = fit($("#breath")); g.setTransform(r, 0, 0, r, 0, 0); g.clearRect(0, 0, w, h);
   const B = S.breath;
   g.strokeStyle = "rgba(120,255,190,.12)"; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
-  if (!B) { g.fillStyle = "#8fb5a5"; g.font = "14px ui-sans-serif, system-ui"; g.textAlign = "center"; g.fillText(`Listening… ${Math.min(100, Math.round(S.slow.buf.length / 1.5))}%`, w / 2, h / 2 - 12); return; }
+  if (!B) { g.fillStyle = "#8fb5a5"; g.font = "14px ui-sans-serif, system-ui"; g.textAlign = "center"; g.fillText(`Listening… ${Math.min(100, Math.round(TONES[0].slow.buf.length / 1.5))}%`, w / 2, h / 2 - 12); return; }
   const s = B.wave.slice(-300), m = Math.max(...s.map(Math.abs)) || 1;
   g.strokeStyle = "#5dffb0"; g.lineWidth = 2.2; g.shadowColor = "#5dffb0"; g.shadowBlur = 8; g.beginPath();
   s.forEach((v, k) => { const x = (k / (s.length - 1)) * w, y = h / 2 - (v / m) * (h * 0.4); k ? g.lineTo(x, y) : g.moveTo(x, y); });
@@ -295,3 +340,6 @@ function show(tab) {
   for (const id of ["wave", "breathe", "presence"]) $("#" + id).hidden = id !== tab;
 }
 $("#tabs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) show(b.dataset.tab); });
+const SENS_WORDS = ["cautious", "steady", "normal", "keen", "very keen"];
+$("#sens").addEventListener("input", (e) => { S.sens = +e.target.value; $("#sens-word").textContent = SENS_WORDS[S.sens - 1]; try { localStorage.setItem("sonar.sens", S.sens); } catch (err) {} });
+try { const v = +localStorage.getItem("sonar.sens"); if (v >= 1 && v <= 5) { S.sens = v; $("#sens").value = v; $("#sens-word").textContent = SENS_WORDS[v - 1]; } } catch (e) {}
